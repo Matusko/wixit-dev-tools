@@ -1,0 +1,300 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: 'subnet-66f9d22f,subnet-8e7b5ae9'
+
+  VpcId:
+    Type: String
+    Default: 'vpc-9e1122f9'
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+
+  ClusterSize:
+    Type: Number
+    Default: 1
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: 'upsource'
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+
+Mappings:
+  AWSRegionToAMI:
+    ap-south-1:
+      AMI: ami-00491f6f
+    eu-west-3:
+      AMI: ami-9aef59e7
+    eu-west-2:
+      AMI: ami-67cbd003
+    eu-west-1:
+      AMI: ami-1d46df64
+    ap-northeast-2:
+      AMI: ami-c212b2ac
+    ap-northeast-1:
+      AMI: ami-872c4ae1
+    sa-east-1:
+      AMI: ami-af521fc3
+    ca-central-1:
+      AMI: ami-435bde27
+    ap-southeast-1:
+      AMI: ami-910d72ed
+    ap-southeast-2:
+      AMI: ami-58bb443a
+    eu-central-1:
+      AMI: ami-509a053f
+    us-east-1:
+      AMI: ami-28456852
+    us-east-2:
+      AMI: ami-ce1c36ab
+    us-west-1:
+      AMI: ami-74262414
+    us-west-2:
+      AMI: ami-decc7fa6
+
+Resources:
+  SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-alb
+      SecurityGroupIngress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "TCP"
+        FromPort: 80
+        ToPort: 80
+      VpcId: !Ref VpcId
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets: !Ref Subnets
+      SecurityGroups:
+      - !Ref SecurityGroup
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref TargetGroup
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: LoadBalancerListener
+    Properties:
+      ListenerArn: !Ref LoadBalancerListener
+      Priority: 1
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      Actions:
+      - TargetGroupArn: !Ref TargetGroup
+        Type: forward
+
+  TargetGroup:
+    DependsOn: LoadBalancer
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8080
+      Protocol: HTTP
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}
+
+  EC2Service:
+    Type: AWS::ECS::Service
+    DependsOn: ListenerRule
+    Properties:
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: EC2
+      LoadBalancers:
+      - ContainerName: upsource
+        ContainerPort: 8080
+        TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-test
+      RequiresCompatibilities:
+      - EC2
+      Memory: 896
+      Cpu: 256
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      ContainerDefinitions:
+      - Name: upsource
+        Image: jetbrains/upsource:2018.1.584
+        Essential: true
+        MountPoints:
+        - ContainerPath: /opt/upsource/data
+          SourceVolume: upsource-vol-data
+        - ContainerPath: /opt/upsource/conf
+          SourceVolume: upsource-vol-conf
+        - ContainerPath: /opt/upsource/logs
+          SourceVolume: upsource-vol-logs
+        - ContainerPath: /opt/upsource/backups
+          SourceVolume: upsource-vol-backups
+        Memory: 896
+        PortMappings:
+        - HostPort: 8080
+          ContainerPort: 8080
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-region: !Ref AWS::Region
+            awslogs-group: !Ref LogGroup
+            awslogs-stream-prefix: !Ref AWS::StackName
+      Volumes:
+      - Name: upsource-vol-data
+        Host:
+          SourcePath: "/opt/data"
+      - Name: upsource-vol-conf
+        Host:
+          SourcePath: "/opt/conf"
+      - Name: upsource-vol-logs
+        Host:
+          SourcePath: "/opt/logs"
+      - Name: upsource-vol-backups
+        Host:
+          SourcePath: "/opt/backups"
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - !Ref ECSRole
+
+  SecurityGroupScaling:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-hosts
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref SecurityGroup
+        IpProtocol: -1
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "TCP"
+        FromPort: 22
+        ToPort: 22
+      VpcId: !Ref VpcId
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref Subnets
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: !Ref ClusterSize
+      MaxSize: !Ref ClusterSize
+      DesiredCapacity: !Ref ClusterSize
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName} - ECS Host
+        PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            01_add_instance_to_cluster:
+              command: !Sub echo ECS_CLUSTER=${Cluster} > /etc/ecs/ecs.config
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              mode: 000400
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                - /etc/cfn/cfn-hup.conf
+                - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+    Properties:
+      ImageId: !FindInMap [ AWSRegionToAMI, !Ref "AWS::Region", AMI ]
+      KeyName: !Ref 'KeyName'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroups:
+      - !Ref SecurityGroupScaling
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource AutoScalingGroup
+
+
+Outputs:
+  LoadBalancerListenerArn:
+    Value: !Ref LoadBalancerListener
